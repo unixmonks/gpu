@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# gpu - bring Strata or Maya up on a rented GPU box over SSH and point OpenCode at it.
+# Run `./gpu help` for the commands. Settings come from .env (see .env.example).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+STATE="$ROOT/.state"
+mkdir -p "$STATE"
+[ -f "$ROOT/.env" ] && . "$ROOT/.env"
+
+GPU_SSH_PORT="${GPU_SSH_PORT:-22}"
+GPU_DATA_DIR="${GPU_DATA_DIR:-}"
+GPU_LOCAL_PORT="${GPU_LOCAL_PORT:-18080}"
+REMOTE_PORT=8080
+OPENCODE_CONFIG="${OPENCODE_CONFIG:-$HOME/.config/opencode/opencode.json}"
+TUNNEL_SOCK="$STATE/tunnel.sock"
+
+die() { echo "gpu: $*" >&2; exit 1; }
+need_host() { [ -n "${GPU_HOST:-}" ] || die "set GPU_HOST in .env (e.g. root@1.2.3.4)"; }
+
+ssh_opts() { echo -p "$GPU_SSH_PORT" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30; }
+rssh() { need_host; ssh $(ssh_opts) "$GPU_HOST" "$@"; }
+
+api_key() {
+  if [ ! -s "$STATE/api-key" ]; then
+    (umask 077; echo "sk-gpu-$(openssl rand -hex 24)" > "$STATE/api-key")
+  fi
+  cat "$STATE/api-key"
+}
+
+# The profile last brought up; `up` records it so the other commands know the context and engine.
+current_profile() {
+  [ -s "$STATE/profile" ] || die "nothing brought up yet: ./gpu up <profile>"
+  cat "$STATE/profile"
+}
+
+load_profile() {
+  local f="$ROOT/profiles/$1.env"
+  [ -f "$f" ] || die "no profile '$1' (see ./gpu profiles)"
+  . "$f"
+}
+
+cmd_profiles() {
+  for f in "$ROOT"/profiles/*.env; do
+    printf '%-24s %s\n' "$(basename "$f" .env)" "$(sed -n 's/^# //p' "$f" | head -1)"
+  done
+}
+
+cmd_check() {
+  rssh "GPU_DATA_DIR='$GPU_DATA_DIR' bash -s" < "$ROOT/remote/check.sh"
+}
+
+cmd_up() {
+  local profile="${1:-}"
+  [ -n "$profile" ] || die "usage: ./gpu up <profile>"
+  load_profile "$profile"
+  need_host
+  api_key > /dev/null
+  echo "$profile" > "$STATE/profile"
+
+  echo "== copying harness to $GPU_HOST:~/.gpu"
+  rssh 'mkdir -p ~/.gpu && chmod 700 ~/.gpu'
+  scp -q -P "$GPU_SSH_PORT" -o StrictHostKeyChecking=accept-new \
+    "$ROOT"/remote/*.sh "$ROOT/profiles/$profile.env" "$GPU_HOST:.gpu/"
+  if [ "$ENGINE" = maya-beam ]; then   # (Maya's Beam port: applied to the pinned release on the box)
+    rssh 'mkdir -p ~/.gpu/patches && rm -f ~/.gpu/patches/*.patch'
+    scp -q -P "$GPU_SSH_PORT" -o StrictHostKeyChecking=accept-new "$ROOT"/patches/maya-beam/*.patch "$GPU_HOST:.gpu/patches/"
+  fi
+  rssh 'umask 077; cat > ~/.gpu/api-key' < "$STATE/api-key"
+
+  # Setup and serving run inside tmux on the box, so a dropped SSH session never stops a
+  # 300 GB download or the server. This terminal only follows the log.
+  echo "== starting $ENGINE ($profile) in tmux session 'gpu'"
+  rssh "GPU_DATA_DIR='$GPU_DATA_DIR' HF_TOKEN='${HF_TOKEN:-}' bash ~/.gpu/start.sh '$profile'"
+  echo "== following the log (Ctrl+C stops following; the box keeps going)"
+  cmd_logs
+}
+
+cmd_logs() { rssh 'tail -n 200 -F ~/.gpu/run.log'; }
+
+cmd_status() {
+  rssh 'tmux has-session -t gpu 2>/dev/null && echo "tmux session: running" || echo "tmux session: none"; tail -n 5 ~/.gpu/run.log 2>/dev/null'
+  if tunnel_up; then
+    echo "tunnel: 127.0.0.1:$GPU_LOCAL_PORT"
+    curl -fsS -m 5 -H "Authorization: Bearer $(api_key)" "http://127.0.0.1:$GPU_LOCAL_PORT/v1/models" \
+      && echo || echo "server: not answering yet"
+  else
+    echo "tunnel: down (./gpu tunnel)"
+  fi
+}
+
+cmd_stop() {
+  rssh 'bash ~/.gpu/stop.sh'
+  tunnel_down
+}
+
+tunnel_up() { [ -S "$TUNNEL_SOCK" ] && ssh -S "$TUNNEL_SOCK" -O check "$GPU_HOST" 2>/dev/null; }
+tunnel_down() { tunnel_up && ssh -S "$TUNNEL_SOCK" -O exit "$GPU_HOST" 2>/dev/null || true; }
+
+# The engines listen on the box's 127.0.0.1 only; this forwards it to this machine.
+cmd_tunnel() {
+  need_host
+  if tunnel_up; then echo "tunnel already up: http://127.0.0.1:$GPU_LOCAL_PORT/v1"; return; fi
+  ssh $(ssh_opts) -f -N -M -S "$TUNNEL_SOCK" -o ExitOnForwardFailure=yes \
+    -L "127.0.0.1:$GPU_LOCAL_PORT:127.0.0.1:$REMOTE_PORT" "$GPU_HOST"
+  echo "tunnel up: http://127.0.0.1:$GPU_LOCAL_PORT/v1"
+}
+
+served_model() {
+  curl -fsS -m 10 -H "Authorization: Bearer $(api_key)" "http://127.0.0.1:$GPU_LOCAL_PORT/v1/models" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])'
+}
+
+cmd_wait() {
+  cmd_tunnel
+  echo -n "waiting for the server"
+  until served_model >/dev/null 2>&1; do echo -n .; sleep 15; done
+  echo " ready: $(served_model)"
+}
+
+# Adds (or replaces) a "gpu" provider in opencode.json; everything else in the file is kept.
+cmd_opencode() {
+  load_profile "$(current_profile)"
+  cmd_tunnel
+  local model
+  model="$(served_model)" || die "server not answering; ./gpu wait"
+  [ -f "$OPENCODE_CONFIG" ] && cp "$OPENCODE_CONFIG" "$OPENCODE_CONFIG.bak-$(date +%Y%m%d-%H%M%S)"
+  python3 "$ROOT/lib/opencode_config.py" "$OPENCODE_CONFIG" "$model" "$CONTEXT" "$GPU_LOCAL_PORT" "$ENGINE"
+  echo "opencode.json: provider 'gpu' -> gpu/$model ($CONTEXT tokens)"
+  echo "start it with ./gpu code (sets GPU_API_KEY), or export GPU_API_KEY=\$(cat $STATE/api-key)"
+}
+
+cmd_code() {
+  cmd_tunnel
+  local model
+  model="$(served_model)" || die "server not answering; ./gpu wait"
+  GPU_API_KEY="$(api_key)" exec opencode -m "gpu/$model" "$@"
+}
+
+cmd_ssh() { need_host; exec ssh $(ssh_opts) -t "$GPU_HOST" "${@:-tmux attach -t gpu || bash -l}"; }
+
+cmd_help() {
+  cat <<EOF
+./gpu profiles            list engine/model profiles
+./gpu check               report the box: GPUs, PCIe links, RAM, memlock, disk, CUDA toolkit
+./gpu up <profile>        install the engine, download the model, start serving (in tmux), follow the log
+./gpu logs | status       follow the log | show what is running
+./gpu wait                open the tunnel and wait until the model answers
+./gpu tunnel              forward the box's API to http://127.0.0.1:$GPU_LOCAL_PORT/v1
+./gpu opencode            add the served model to $OPENCODE_CONFIG as provider "gpu"
+./gpu code [args]         open OpenCode on the served model
+./gpu ssh                 attach to the box's tmux session
+./gpu stop                stop the engine and the tunnel
+EOF
+}
+
+case "${1:-help}" in
+  profiles|check|up|logs|status|stop|tunnel|wait|opencode|code|ssh|help) c="$1"; shift || true; "cmd_$c" "$@" ;;
+  *) cmd_help; exit 1 ;;
+esac
