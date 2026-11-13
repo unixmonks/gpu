@@ -93,8 +93,7 @@ gpu                      local CLI
 lib/opencode_config.py   merges the "gpu" provider into opencode.json
 remote/start.sh          on the box: packages, stops systemd-oomd, picks the data dir, starts tmux
 remote/maya.sh           clones Maya at the pinned tag, runs ./maya.sh --model … --yes --download-model
-remote/maya-beam.sh      Maya at the pinned tag + patches/maya-beam, CMake build, kernel test, GGUF download, serve
-patches/maya-beam/       the Beam port: one commit against Maya v1.1.61 (git am)
+remote/maya-beam.sh      the unixmonks Maya fork (branch beam), CMake build, kernel test, GGUF download, serve
 remote/strata.sh         installs Strata (installer checked against the release's SHA256SUMS), strata launch --yes --no-tui
 remote/check.sh          hardware report
 remote/stop.sh           stops the engine and tmux
@@ -113,11 +112,12 @@ profiles/*.env           engine / model / context
 
 ## Reflection Beam on Maya
 
-[Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B) is not one of Maya's models, so this repo
-carries a port: `patches/maya-beam/`, one commit against Maya v1.1.61. It adds Beam to Maya's MiniMax engine
+[Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B) is not one of Maya's models, so it runs from
+a fork with a port: [unixmonks/project-maya](https://github.com/unixmonks/project-maya), branch `beam`, one commit
+on Maya v1.1.61. It adds Beam to Maya's MiniMax engine
 (`maya-mm3`): its attention (9 global layers, 43 sliding-window layers in small ring caches), the attention gate,
 sandwich norms, depth-scaled residual, group-limited router, logit softcap, tokenizer, chat template and tool-call
-parsing. Maya's existing placement and expert offload are reused unchanged. See the patch's `docs/BEAM.md` for the
+parsing. Maya's existing placement and expert offload are reused unchanged. See the fork's [`docs/BEAM.md`](https://github.com/unixmonks/project-maya/blob/beam/docs/BEAM.md) for the
 details.
 
 Beam suits the 1M-context goal: only its 9 global layers keep the whole context, so 1M tokens of KV cache is about

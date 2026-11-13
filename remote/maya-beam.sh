@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Runs on the GPU box inside tmux: Project Maya at its pinned release with this repo's Beam patches (patches/maya-beam),
+# Runs on the GPU box inside tmux: the unixmonks fork of Project Maya with the Beam port (branch beam),
 # built with CMake for this box's GPUs; Beam's kernel test; a Beam GGUF from unsloth; the pack and the server on
 # 127.0.0.1:8080.  Each step is skipped when its result is there from a run before.
 set -euo pipefail
 . ~/.gpu/"$1".env
-MAYA_VERSION="${MAYA_VERSION:-v1.1.61}"
+MAYA_BEAM_REPO="${MAYA_BEAM_REPO:-https://github.com/unixmonks/project-maya.git}"
+MAYA_BEAM_REF="${MAYA_BEAM_REF:-beam}"
 BEAM_REPO="${BEAM_REPO:-unsloth/Beam-1.0-501B-A23B-GGUF}"
 DIR="$DATA/project-maya-beam"
 MODELS="$DATA/models/beam"
@@ -15,11 +16,8 @@ command -v nvcc >/dev/null || [ -x /usr/local/cuda/bin/nvcc ] || {
 }
 export PATH="/usr/local/cuda/bin:$PATH"
 
-echo "== Maya $MAYA_VERSION + the Beam patches"
-if [ ! -d "$DIR/.git" ]; then
-  git clone --depth 1 --branch "$MAYA_VERSION" https://github.com/mw00/project-maya.git "$DIR"
-  git -C "$DIR" -c user.name=gpu -c user.email=gpu@localhost am ~/.gpu/patches/*.patch
-fi
+echo "== Maya with the Beam port ($MAYA_BEAM_REPO $MAYA_BEAM_REF)"
+[ -d "$DIR/.git" ] || git clone --depth 1 --branch "$MAYA_BEAM_REF" "$MAYA_BEAM_REPO" "$DIR"
 cd "$DIR"
 
 echo "== Python environment"

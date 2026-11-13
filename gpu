@@ -62,10 +62,6 @@ cmd_up() {
   rssh 'mkdir -p ~/.gpu && chmod 700 ~/.gpu'
   scp -q -P "$GPU_SSH_PORT" -o StrictHostKeyChecking=accept-new \
     "$ROOT"/remote/*.sh "$ROOT/profiles/$profile.env" "$GPU_HOST:.gpu/"
-  if [ "$ENGINE" = maya-beam ]; then   # (Maya's Beam port: applied to the pinned release on the box)
-    rssh 'mkdir -p ~/.gpu/patches && rm -f ~/.gpu/patches/*.patch'
-    scp -q -P "$GPU_SSH_PORT" -o StrictHostKeyChecking=accept-new "$ROOT"/patches/maya-beam/*.patch "$GPU_HOST:.gpu/patches/"
-  fi
   rssh 'umask 077; cat > ~/.gpu/api-key' < "$STATE/api-key"
 
   # Setup and serving run inside tmux on the box, so a dropped SSH session never stops a
